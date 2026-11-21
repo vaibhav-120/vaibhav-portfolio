@@ -1,0 +1,652 @@
+---
+// Voice-only "Ask about my work" agent.
+// Once started, it keeps listening and answering until the visitor presses Stop.
+// Speaking over the agent interrupts it immediately (barge-in).
+---
+<section id="ask" class="ask" aria-labelledby="ask-title" data-state="idle">
+  <div class="stage">
+    <h2 id="ask-title">Ask about my work</h2>
+    <p class="muted lede">Start a conversation and ask anything about my projects. Interrupt any time.</p>
+
+    <div class="orb-wrap">
+      <canvas class="orb" data-orb aria-hidden="true"></canvas>
+    </div>
+    <p class="state" data-state-label aria-live="polite">Ready when you are</p>
+    <p class="status" data-status></p>
+
+    <button type="button" class="btn btn-primary talk" data-toggle>
+      <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+      <span data-toggle-label>Start conversation</span>
+    </button>
+    <p class="hint">Headphones work best.</p>
+  </div>
+
+  <ol class="log" aria-live="polite" aria-label="Conversation transcript" data-log></ol>
+</section>
+
+<style>
+  .ask {
+    display: grid; grid-template-columns: minmax(0, 1fr); gap: clamp(1.25rem, 3vw, 2rem);
+    background: var(--accent-soft);
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    border-radius: var(--r-lg);
+    padding: clamp(1.25rem, 3vw, 2rem);
+  }
+  @media (min-width: 900px) {
+    .ask { grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); align-items: stretch; }
+  }
+
+  .stage { display: flex; flex-direction: column; align-items: center; text-align: center; min-width: 0; }
+  .stage h2 { font-size: 1.35rem; }
+  .lede { margin-top: .4rem; max-width: 36ch; font-size: .96rem; }
+
+  .orb-wrap { width: min(240px, 62vw); aspect-ratio: 1; margin: 1.25rem 0 .5rem; }
+  .orb { width: 100%; height: 100%; display: block; }
+
+  .state { font-weight: 620; font-size: 1.05rem; min-height: 1.6em; }
+  .status { font-size: .85rem; color: var(--muted); min-height: 1.4em; max-width: 40ch; }
+  .status :global(strong) { color: var(--accent-ink); font-weight: 620; }
+
+  .talk { margin-top: 1rem; }
+  .talk svg { width: 18px; height: 18px; }
+  .ask:not([data-state='idle']) .talk {
+    background: var(--surface); color: var(--ink); border-color: var(--line-strong);
+  }
+  .ask:not([data-state='idle']) .talk svg { display: none; }
+  .hint { margin-top: .6rem; font-size: .8rem; color: var(--muted); }
+
+  .log {
+    list-style: none; margin: 0; padding: 1rem;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--r-md);
+    min-width: 0; min-height: 280px; max-height: 440px; overflow-y: auto;
+    display: flex; flex-direction: column; gap: .75rem;
+  }
+  .log:empty::before {
+    content: 'Try asking what he built for the healthcare platform, or how the Emnaar voice pipeline works.';
+    color: var(--muted); font-size: .92rem; margin: auto; text-align: center; max-width: 34ch;
+  }
+  .log :global(li) {
+    max-width: 88%; padding: .6rem .8rem; border-radius: var(--r-md);
+    font-size: .96rem; line-height: 1.5;
+  }
+  .log :global(.q) { align-self: flex-end; background: var(--accent); color: var(--on-accent); border-bottom-right-radius: 4px; }
+  .log :global(.q.interim) { opacity: .65; }
+  .log :global(.a) { align-self: flex-start; background: var(--surface-2); border-bottom-left-radius: 4px; }
+  .log :global(.a.pending::after) { content: '…'; color: var(--muted); }
+  .log :global(.a.cut::after) { content: ' —'; color: var(--muted); }
+  .log :global(.a.error) { color: var(--muted); }
+</style>
+
+<script>
+  type Turn = { role: 'user' | 'assistant'; content: string };
+  type State = 'idle' | 'listening' | 'thinking' | 'speaking';
+
+  const root = document.getElementById('ask');
+  if (root) init(root);
+
+  function init(root: HTMLElement) {
+    const log = root.querySelector<HTMLOListElement>('[data-log]')!;
+    const toggle = root.querySelector<HTMLButtonElement>('[data-toggle]')!;
+    const toggleLabel = root.querySelector<HTMLSpanElement>('[data-toggle-label]')!;
+    const stateLabel = root.querySelector<HTMLParagraphElement>('[data-state-label]')!;
+    const status = root.querySelector<HTMLParagraphElement>('[data-status]')!;
+    const canvas = root.querySelector<HTMLCanvasElement>('[data-orb]')!;
+
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+    // ---- Conversation state ------------------------------------------------
+    let state: State = 'idle';
+    const history: Turn[] = [];
+    let recognition: any = null;
+    let utterance = '';
+    let userBubble: HTMLLIElement | null = null;
+    let endTimer = 0;
+    let turnId = 0;
+    let controller: AbortController | null = null;
+    let agentBubble: HTMLLIElement | null = null;
+    let agentText = '';
+    let heard: string[] = []; // sentences the visitor has actually heard this turn
+    let lastAnswer = '';
+    let lastSpokeAt = 0;
+    let streamDone = true;
+
+    // ---- Audio -------------------------------------------------------------
+    let audioCtx: AudioContext | null = null;
+    let outGain: GainNode | null = null;
+    let outAnalyser: AnalyserNode | null = null;
+    let micAnalyser: AnalyserNode | null = null;
+    let micStream: MediaStream | null = null;
+    let nextStart = 0;
+    let sources: AudioBufferSourceNode[] = [];
+    let browserQueue = 0;
+
+    const labels: Record<State, string> = {
+      idle: 'Ready when you are',
+      listening: 'Listening',
+      thinking: 'Thinking',
+      speaking: 'Speaking',
+    };
+
+    if (!SR) {
+      toggle.disabled = true;
+      stateLabel.textContent = 'Voice isn’t supported in this browser';
+      status.textContent = 'Try Chrome, Edge, or Safari to talk to the assistant.';
+    }
+
+    function setState(next: State) {
+      state = next;
+      root.dataset.state = next;
+      stateLabel.textContent = labels[next];
+      toggleLabel.textContent = next === 'idle' ? 'Start conversation' : 'Stop';
+      if (next === 'speaking' || next === 'thinking') lastSpokeAt = performance.now();
+    }
+
+    // ---- Start / stop --------------------------------------------------------
+    toggle.addEventListener('click', () => (state === 'idle' ? start() : stop()));
+
+    async function start() {
+      if (!SR) return;
+      status.textContent = '';
+      try {
+        const Ctx = window.AudioContext || (window as any).webkitAudioContext;
+        audioCtx = audioCtx || new Ctx();
+        if (audioCtx.state === 'suspended') await audioCtx.resume();
+        if (!outGain) {
+          outGain = audioCtx.createGain();
+          outAnalyser = audioCtx.createAnalyser();
+          outAnalyser.fftSize = 512;
+          outGain.connect(outAnalyser);
+          outAnalyser.connect(audioCtx.destination);
+        }
+        // Echo-cancelled mic stream, used for the animation's input level.
+        micStream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        });
+        const src = audioCtx.createMediaStreamSource(micStream);
+        micAnalyser = audioCtx.createAnalyser();
+        micAnalyser.fftSize = 512;
+        src.connect(micAnalyser);
+      } catch {
+        status.textContent = 'Microphone access is blocked. Allow it in your browser settings and try again.';
+        cleanupMic();
+        return;
+      }
+      setState('listening');
+      startRecognition();
+    }
+
+    function stop() {
+      turnId++;
+      clearTimeout(endTimer);
+      controller?.abort();
+      controller = null;
+      stopAudio();
+      if (agentBubble && agentBubble.classList.contains('pending')) agentBubble.remove();
+      finishUserBubble(true);
+      if (recognition) {
+        recognition.onend = null;
+        try { recognition.abort(); } catch { /* not running */ }
+        recognition = null;
+      }
+      cleanupMic();
+      utterance = '';
+      setState('idle');
+    }
+
+    function cleanupMic() {
+      micStream?.getTracks().forEach((t) => t.stop());
+      micStream = null;
+      micAnalyser = null;
+    }
+
+    // Don't keep the mic open in a background tab.
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden && state !== 'idle') {
+        stop();
+        status.textContent = 'Paused while the tab was in the background.';
+      }
+    });
+
+    // ---- Speech recognition --------------------------------------------------
+    function startRecognition() {
+      recognition = new SR();
+      recognition.lang = navigator.language?.startsWith('en') ? navigator.language : 'en-US';
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.onresult = (e: any) => {
+        const finals: string[] = [];
+        let interim = '';
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          const t = e.results[i][0].transcript;
+          if (e.results[i].isFinal) finals.push(t);
+          else interim += t;
+        }
+        onSpeech(finals.join(' ').trim(), interim.trim());
+      };
+      recognition.onerror = (e: any) => {
+        if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+          stop();
+          status.textContent = 'Microphone access is blocked. Allow it in your browser settings and try again.';
+        } else if (e.error === 'network') {
+          status.textContent = 'Voice recognition lost its connection. It will keep trying.';
+        }
+        // 'no-speech' and 'aborted' are normal in long sessions; onend restarts.
+      };
+      // Browsers end recognition after silence or a time limit. Keep it going.
+      recognition.onend = () => {
+        if (state === 'idle') return;
+        setTimeout(() => {
+          if (state !== 'idle' && recognition) {
+            try { recognition.start(); } catch { /* already running */ }
+          }
+        }, 150);
+      };
+      try { recognition.start(); } catch { /* already running */ }
+    }
+
+    function words(text: string) {
+      return text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((w) => w.length > 2);
+    }
+
+    // The mic can pick up the agent's own voice from speakers. Ignore speech
+    // that mostly repeats what the agent just said.
+    function looksLikeEcho(heard: string) {
+      const said = new Set(words(agentText + ' ' + lastAnswer));
+      const w = words(heard);
+      if (!w.length) return true;
+      const overlap = w.filter((x) => said.has(x)).length / w.length;
+      return overlap >= 0.6;
+    }
+
+    function isInterruption(heard: string) {
+      if (/^(stop|wait|hold on|sorry|excuse me)\b/i.test(heard.trim())) return true;
+      return words(heard).length >= 2;
+    }
+
+    function onSpeech(finalText: string, interim: string) {
+      const heard = `${finalText} ${interim}`.trim();
+      if (!heard || state === 'idle') return;
+
+      if (state === 'thinking' || state === 'speaking') {
+        if (looksLikeEcho(heard) || !isInterruption(heard)) return;
+        bargeIn();
+      } else if (performance.now() - lastSpokeAt < 2500 && looksLikeEcho(heard)) {
+        return; // Trailing echo just after the agent stopped talking.
+      }
+
+      if (finalText) utterance = `${utterance} ${finalText}`.trim();
+      showUserBubble(`${utterance} ${interim}`.trim());
+
+      // Wait for a short pause before treating the turn as finished.
+      clearTimeout(endTimer);
+      if (finalText) endTimer = window.setTimeout(endTurn, interim ? 1200 : 700);
+    }
+
+    function bargeIn() {
+      turnId++;
+      controller?.abort();
+      controller = null;
+      stopAudio();
+      if (agentBubble) {
+        agentBubble.classList.remove('pending');
+        const said = heard.join(' ');
+        if (said) {
+          agentBubble.textContent = said;
+          agentBubble.classList.add('cut');
+          history.push({ role: 'assistant', content: said });
+        } else agentBubble.remove();
+        lastAnswer = agentText;
+      }
+      agentBubble = null;
+      agentText = '';
+      streamDone = true;
+      status.textContent = '';
+      setState('listening');
+    }
+
+    function showUserBubble(text: string) {
+      if (!userBubble) {
+        userBubble = document.createElement('li');
+        userBubble.className = 'q interim';
+        log.appendChild(userBubble);
+      }
+      userBubble.textContent = text;
+      log.scrollTop = log.scrollHeight;
+    }
+
+    function finishUserBubble(discard = false) {
+      if (!userBubble) return;
+      if (discard && userBubble.classList.contains('interim')) userBubble.remove();
+      else userBubble.classList.remove('interim');
+      userBubble = null;
+    }
+
+    function endTurn() {
+      const question = utterance.trim().slice(0, 500);
+      utterance = '';
+      if (!question || state !== 'listening') return;
+      if (userBubble) userBubble.textContent = question;
+      finishUserBubble();
+      ask(question);
+    }
+
+    // ---- Audio playback --------------------------------------------------------
+    function stopAudio() {
+      sources.forEach((s) => { s.onended = null; try { s.stop(); } catch { /* ended */ } });
+      sources = [];
+      nextStart = 0;
+      browserQueue = 0;
+      if ('speechSynthesis' in window) speechSynthesis.cancel();
+    }
+
+    function audioPlaying() {
+      return sources.length > 0 || browserQueue > 0;
+    }
+
+    function checkTurnDone() {
+      if ((state === 'thinking' || state === 'speaking') && streamDone && !audioPlaying()) {
+        lastSpokeAt = performance.now();
+        setState('listening');
+      }
+    }
+
+    async function playWav(b64: string, myTurn: number, onStart: (delayMs: number) => void) {
+      if (!audioCtx || !outGain) return false;
+      try {
+        const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+        const buffer = await audioCtx.decodeAudioData(bytes.buffer);
+        if (myTurn !== turnId) return true; // interrupted while decoding
+        const src = audioCtx.createBufferSource();
+        src.buffer = buffer;
+        src.connect(outGain);
+        const startAt = Math.max(audioCtx.currentTime + 0.02, nextStart);
+        src.start(startAt);
+        nextStart = startAt + buffer.duration;
+        sources.push(src);
+        src.onended = () => {
+          sources = sources.filter((s) => s !== src);
+          checkTurnDone();
+        };
+        if (state === 'thinking') setState('speaking');
+        onStart((startAt - audioCtx.currentTime) * 1000);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    function speakBrowser(text: string, myTurn: number, onStart: () => void) {
+      if (!('speechSynthesis' in window)) { onStart(); return; }
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = 'en-US';
+      u.rate = 1.03;
+      let started = false;
+      const begin = () => {
+        if (started || myTurn !== turnId) return;
+        started = true;
+        if (state === 'thinking') setState('speaking');
+        onStart();
+      };
+      u.onstart = begin;
+      const finished = () => {
+        if (myTurn !== turnId) return;
+        begin();
+        browserQueue = Math.max(0, browserQueue - 1);
+        checkTurnDone();
+      };
+      u.onend = finished;
+      u.onerror = finished;
+      browserQueue++;
+      speechSynthesis.speak(u);
+    }
+
+    // ---- Asking the backend -----------------------------------------------------
+    async function ask(question: string) {
+      const myTurn = ++turnId;
+      history.push({ role: 'user', content: question });
+      setState('thinking');
+      status.textContent = '';
+      agentText = '';
+      heard = [];
+      agentBubble = document.createElement('li');
+      agentBubble.className = 'a pending';
+      log.appendChild(agentBubble);
+      log.scrollTop = log.scrollHeight;
+      streamDone = false;
+
+      const t0 = performance.now();
+      let model = '';
+      let marked = false;
+      const markFirst = (extraMs = 0) => {
+        if (marked || myTurn !== turnId) return;
+        marked = true;
+        const ms = Math.round(performance.now() - t0 + extraMs);
+        const by = model ? `, answered by ${model.replace(/^openai\//, '')}` : '';
+        status.innerHTML = `First audio in <strong>${ms} ms</strong>${by}`;
+      };
+
+      controller = new AbortController();
+      const bubble = agentBubble;
+      // Show each sentence when it starts playing, so the transcript follows the voice.
+      const reveal = (text: string) => {
+        if (myTurn !== turnId) return;
+        heard.push(text);
+        bubble.classList.remove('pending');
+        bubble.textContent = heard.join(' ');
+        log.scrollTop = log.scrollHeight;
+      };
+      try {
+        const res = await fetch('/api/ask', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ question, history: history.slice(0, -1).slice(-6), voice: true }),
+          signal: controller.signal,
+        });
+        if (!res.ok || !res.body) {
+          let msg = 'The assistant isn’t available right now. You can reach Vaibhav on LinkedIn.';
+          try { msg = (await res.json()).error || msg; } catch { /* not JSON */ }
+          throw new Error(msg);
+        }
+
+        let serverVoice = false;
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done || myTurn !== turnId) break;
+          buf += decoder.decode(value, { stream: true });
+          let idx;
+          while ((idx = buf.indexOf('\n\n')) !== -1) {
+            const block = buf.slice(0, idx);
+            buf = buf.slice(idx + 2);
+            const event = /^event: (.*)$/m.exec(block)?.[1] ?? 'message';
+            const dataLine = /^data: (.*)$/m.exec(block)?.[1];
+            if (!dataLine || myTurn !== turnId) continue;
+            const data = JSON.parse(dataLine);
+
+            if (event === 'ready') serverVoice = !!data.serverVoice;
+            else if (event === 'model') model = data.model;
+            else if (event === 'sentence') {
+              const text: string = data.text;
+              agentText += (agentText ? ' ' : '') + text;
+              const played = serverVoice && data.audio
+                ? await playWav(data.audio, myTurn, (d) => {
+                    markFirst(d);
+                    setTimeout(() => reveal(text), Math.max(0, d));
+                  })
+                : false;
+              if (!played && myTurn === turnId) {
+                speakBrowser(text, myTurn, () => { markFirst(); reveal(text); });
+              }
+            } else if (event === 'error') {
+              throw new Error(data.message);
+            }
+          }
+        }
+        if (myTurn !== turnId) return;
+        if (!agentText) throw new Error('No answer came back. Please ask again.');
+        history.push({ role: 'assistant', content: agentText });
+        if (history.length > 12) history.splice(0, history.length - 12);
+        lastAnswer = agentText;
+      } catch (err: any) {
+        if (err?.name === 'AbortError' || myTurn !== turnId) return;
+        bubble.classList.remove('pending');
+        bubble.classList.add('error');
+        const msg = heard.join(' ') || err?.message || 'Something went wrong. Please ask again.';
+        bubble.textContent = msg;
+        if (!agentText) {
+          lastAnswer = msg;
+          speakBrowser(msg, myTurn, () => {});
+        }
+      } finally {
+        if (myTurn === turnId) {
+          controller = null;
+          streamDone = true;
+          agentBubble = null;
+          agentText = '';
+          checkTurnDone();
+        }
+      }
+    }
+
+    // ---- Orb animation ------------------------------------------------------------
+    const ctx2d = canvas.getContext('2d')!;
+    let colors = readColors();
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => (colors = readColors()));
+
+    function readColors() {
+      const cs = getComputedStyle(root);
+      return {
+        accent: cs.getPropertyValue('--accent').trim() || '#0e7c74',
+        ink: cs.getPropertyValue('--accent-ink').trim() || '#0a5c56',
+        soft: cs.getPropertyValue('--surface').trim() || '#ffffff',
+      };
+    }
+
+    function level(analyser: AnalyserNode | null) {
+      if (!analyser) return 0;
+      const data = new Uint8Array(analyser.fftSize);
+      analyser.getByteTimeDomainData(data);
+      let sum = 0;
+      for (let i = 0; i < data.length; i++) {
+        const v = (data[i] - 128) / 128;
+        sum += v * v;
+      }
+      return Math.min(1, Math.sqrt(sum / data.length) * 3.5);
+    }
+
+    let smooth = 0;
+    let visible = true;
+    new IntersectionObserver(([entry]) => {
+      visible = entry.isIntersecting;
+      if (visible) requestAnimationFrame(draw);
+    }).observe(canvas);
+
+    function draw(now: number) {
+      if (!visible) return;
+      const dpr = window.devicePixelRatio || 1;
+      const size = canvas.clientWidth;
+      if (canvas.width !== Math.round(size * dpr)) {
+        canvas.width = canvas.height = Math.round(size * dpr);
+      }
+      const c = ctx2d;
+      c.setTransform(dpr, 0, 0, dpr, 0, 0);
+      c.clearRect(0, 0, size, size);
+
+      const still = reduceMotion.matches;
+      const t = still ? 0 : now / 1000;
+
+      let target = 0;
+      if (state === 'listening') target = level(micAnalyser);
+      else if (state === 'speaking') {
+        target = sources.length ? level(outAnalyser) : 0.35 + 0.25 * Math.sin(t * 9) * Math.sin(t * 3.1);
+      } else if (state === 'thinking') target = 0.12;
+      else target = 0.05 + 0.04 * Math.sin(t * 1.2);
+      if (still) target = state === 'idle' ? 0 : 0.15;
+      smooth += (target - smooth) * 0.18;
+
+      const cx = size / 2;
+      const r0 = size * 0.27;
+
+      // Halo
+      const haloR = Math.min(size * 0.49, r0 * (1.6 + smooth * 0.3));
+      const halo = c.createRadialGradient(cx, cx, r0 * 0.6, cx, cx, haloR);
+      halo.addColorStop(0, withAlpha(colors.accent, 0.28 + smooth * 0.25));
+      halo.addColorStop(1, withAlpha(colors.accent, 0));
+      c.fillStyle = halo;
+      c.beginPath();
+      c.arc(cx, cx, haloR, 0, Math.PI * 2);
+      c.fill();
+
+      // Three layered blobs that ripple with the voice level.
+      const layers = [
+        { scale: 1.18, alpha: 0.18, speed: 0.6, amp: 0.1 },
+        { scale: 1.08, alpha: 0.3, speed: -0.9, amp: 0.08 },
+        { scale: 1.0, alpha: 1, speed: 1.3, amp: 0.06 },
+      ];
+      for (const L of layers) {
+        c.beginPath();
+        const n = 120;
+        for (let i = 0; i <= n; i++) {
+          const a = (i / n) * Math.PI * 2;
+          const wobble =
+            Math.sin(a * 3 + t * L.speed * 2) * 0.5 +
+            Math.sin(a * 5 - t * L.speed * 1.4) * 0.3 +
+            Math.sin(a * 7 + t * L.speed * 3.1) * 0.2;
+          const r = r0 * L.scale * (1 + (L.amp * 0.4 + smooth * L.amp * 1.8) * wobble + smooth * 0.07);
+          const x = cx + Math.cos(a) * r;
+          const y = cx + Math.sin(a) * r;
+          i ? c.lineTo(x, y) : c.moveTo(x, y);
+        }
+        c.closePath();
+        if (L.alpha === 1) {
+          const g = c.createLinearGradient(cx - r0, cx - r0, cx + r0, cx + r0);
+          g.addColorStop(0, colors.accent);
+          g.addColorStop(1, colors.ink);
+          c.fillStyle = g;
+        } else {
+          c.fillStyle = withAlpha(colors.accent, L.alpha);
+        }
+        c.fill();
+      }
+
+      // Thinking: dots orbiting the core.
+      if (state === 'thinking') {
+        for (let i = 0; i < 3; i++) {
+          const a = t * 2.4 + (i * Math.PI * 2) / 3;
+          const rr = r0 * 1.45;
+          c.beginPath();
+          c.fillStyle = withAlpha(colors.ink, 0.85);
+          c.arc(cx + Math.cos(a) * rr, cx + Math.sin(a) * rr, size * 0.018, 0, Math.PI * 2);
+          c.fill();
+        }
+      }
+
+      // Soft highlight on the core.
+      const hl = c.createRadialGradient(cx - r0 * 0.35, cx - r0 * 0.4, 0, cx - r0 * 0.35, cx - r0 * 0.4, r0 * 0.9);
+      hl.addColorStop(0, 'rgba(255,255,255,0.35)');
+      hl.addColorStop(1, 'rgba(255,255,255,0)');
+      c.fillStyle = hl;
+      c.beginPath();
+      c.arc(cx, cx, r0 * 0.98, 0, Math.PI * 2);
+      c.fill();
+
+      requestAnimationFrame(draw);
+    }
+
+    function withAlpha(color: string, a: number) {
+      const hex = color.replace('#', '');
+      if (hex.length === 6) {
+        const n = parseInt(hex, 16);
+        return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
+      }
+      return color;
+    }
+
+    requestAnimationFrame(draw);
+  }
+</script>

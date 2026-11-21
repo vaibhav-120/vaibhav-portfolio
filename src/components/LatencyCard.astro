@@ -1,0 +1,92 @@
+---
+// Production latency numbers from the case studies, drawn on one shared scale
+// so the difference is visible at a glance.
+const max = 12; // seconds
+const rows = [
+  {
+    project: 'HealthAera',
+    metric: 'Time to first token',
+    href: '/work/healthaera/',
+    bars: [
+      { label: 'Original', value: 12, text: '~12 s', kind: 'before' },
+      { label: 'Re-architected', value: 2, text: '~2 s', kind: 'after' },
+    ],
+  },
+  {
+    project: 'Emnaar',
+    metric: 'End of caller’s turn to first audio',
+    href: '/work/emnaar/',
+    bars: [{ label: 'Voice pipeline', value: 0.8, text: '~800 ms', kind: 'after' }],
+  },
+];
+const ticks = [0, 4, 8, 12];
+---
+<section class="latency" aria-labelledby="latency-title">
+  <h2 id="latency-title" class="title">Production latency, on one scale</h2>
+  {rows.map((row) => (
+    <div class="row">
+      <p class="row-head">
+        <a href={row.href}>{row.project}</a>
+        <span class="muted">{row.metric}</span>
+      </p>
+      <ul class="bars">
+        {row.bars.map((b) => (
+          <li class={`bar ${b.kind}`}>
+            <span class="bar-label">{b.label}</span>
+            <span class="track">
+              <span class="fill" style={`--w:${(b.value / max) * 100}%`}></span>
+              <span class="value">{b.text}</span>
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  ))}
+  <div class="axis" aria-hidden="true">
+    <span class="axis-pad"></span>
+    <span class="ticks">
+      {ticks.map((t) => <span style={`left:${(t / max) * 100}%`}>{t} s</span>)}
+    </span>
+  </div>
+</section>
+
+<style>
+  .latency {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--r-lg);
+    padding: clamp(1.25rem, 3vw, 1.75rem);
+  }
+  .title { font-size: 1rem; font-weight: 620; letter-spacing: 0; margin-bottom: 1.25rem; }
+  .row + .row { margin-top: 1.4rem; padding-top: 1.2rem; border-top: 1px solid var(--line); }
+  .row-head { display: flex; flex-wrap: wrap; gap: .25rem .6rem; align-items: baseline; margin-bottom: .7rem; font-size: .92rem; }
+  .row-head a { font-weight: 620; color: var(--ink); }
+  .bars { list-style: none; margin: 0; padding: 0; display: grid; gap: .55rem; }
+  .bar { display: grid; grid-template-columns: 7.5rem 1fr; align-items: center; gap: .75rem; }
+  .bar-label { font-size: .85rem; color: var(--muted); }
+  .track { position: relative; display: flex; align-items: center; gap: .5rem; height: 26px; }
+  .fill {
+    display: block; height: 100%; width: var(--w); min-width: 4px;
+    border-radius: 6px;
+    animation: grow 900ms cubic-bezier(.2,.7,.2,1) both;
+  }
+  .before .fill { background: var(--line-strong); animation-delay: 150ms; }
+  .after .fill { background: var(--accent); animation-delay: 450ms; }
+  .value { font-weight: 650; font-size: .95rem; white-space: nowrap; }
+  .after .value { color: var(--accent-ink); }
+  /* Long bars hold their value label inside. */
+  .before .track { gap: 0; }
+  .before .value { position: absolute; right: .6rem; color: var(--ink); }
+
+  .axis { display: grid; grid-template-columns: 7.5rem 1fr; gap: .75rem; margin-top: 1rem; }
+  .ticks { position: relative; height: 1.2rem; border-top: 1px solid var(--line); }
+  .ticks span { position: absolute; top: .25rem; transform: translateX(-50%); font-size: .75rem; color: var(--muted); white-space: nowrap; }
+  .ticks span:first-child { transform: none; }
+  .ticks span:last-child { transform: translateX(-100%); }
+
+  @keyframes grow { from { width: 0; } }
+  @media (prefers-reduced-motion: reduce) { .fill { animation: none; } }
+  @media (max-width: 420px) {
+    .bar, .axis { grid-template-columns: 6.2rem 1fr; gap: .5rem; }
+  }
+</style>

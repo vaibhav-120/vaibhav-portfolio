@@ -1,0 +1,38 @@
+---
+import { getCollection } from 'astro:content';
+import Base from '../../layouts/Base.astro';
+
+const notes = (await getCollection('notes', ({ data }) => !data.draft)).sort(
+  (a, b) => b.data.date.valueOf() - a.data.date.valueOf(),
+);
+const fmt = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+---
+<Base title="Notes" description="Short technical notes on building production LLM, agentic and voice AI systems.">
+  <section class="wrap page">
+    <h1>Notes</h1>
+    <p class="muted lede">Short write-ups on what I learned building these systems.</p>
+    {notes.length === 0 ? (
+      <p class="empty">No notes published yet. Case studies are on the <a href="/#work">home page</a>.</p>
+    ) : (
+      <ul class="list">
+        {notes.map((n) => (
+          <li>
+            <a href={`/notes/${n.id}/`}>{n.data.title}</a>
+            <p class="muted">{n.data.summary}</p>
+            <time datetime={n.data.date.toISOString()}>{fmt.format(n.data.date)}</time>
+          </li>
+        ))}
+      </ul>
+    )}
+  </section>
+</Base>
+
+<style>
+  .page { padding-block: 3rem 5rem; }
+  .lede { margin-top: .75rem; }
+  .empty { margin-top: 2rem; }
+  .list { list-style: none; padding: 0; margin: 2.5rem 0 0; display: grid; gap: 1.75rem; max-width: 68ch; }
+  .list a { font-size: 1.2rem; font-weight: 620; color: var(--ink); }
+  .list p { margin-top: .3rem; }
+  time { font-size: .85rem; color: var(--muted); }
+</style>

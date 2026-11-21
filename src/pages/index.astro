@@ -1,0 +1,161 @@
+---
+import { getCollection } from 'astro:content';
+import Base from '../layouts/Base.astro';
+import LatencyCard from '../components/LatencyCard.astro';
+import WorkCard from '../components/WorkCard.astro';
+import AskAgent from '../components/AskAgent.astro';
+import Icon from '../components/Icon.astro';
+import { profile, experience, education, skills } from '../data/profile';
+
+const work = (await getCollection('work', ({ data }) => !data.draft)).sort(
+  (a, b) => a.data.order - b.data.order,
+);
+const featured = work.filter((w) => w.data.featured);
+const more = work.filter((w) => !w.data.featured);
+---
+<Base>
+  <section class="hero wrap">
+    <div class="hero-text">
+      <p class="who">{profile.name}, {profile.role}</p>
+      <h1>{profile.headline}</h1>
+      <div class="intro">
+        {profile.intro.map((p) => <p>{p}</p>)}
+      </div>
+      <div class="actions">
+        <a class="btn btn-primary" href="#work">See case studies</a>
+        {profile.links.resume && (
+          <a class="btn btn-quiet" href={profile.links.resume} target="_blank" rel="noopener">
+            <Icon name="download" /> Download résumé
+          </a>
+        )}
+        <a class="btn btn-quiet" href={profile.links.linkedin} target="_blank" rel="me noopener">
+          <Icon name="linkedin" /> LinkedIn
+        </a>
+      </div>
+    </div>
+    <div class="hero-panel">
+      <LatencyCard />
+    </div>
+  </section>
+
+  {(profile.askAgentEnabled || import.meta.env.DEV) && (
+    <div class="wrap ask-slot"><AskAgent /></div>
+  )}
+
+  <section id="work" class="section wrap" aria-labelledby="work-title">
+    <div class="section-head">
+      <h2 id="work-title">Case studies</h2>
+      <p>Most of this is client work, so each case study covers the problem, the architecture, and the numbers, with client names left out.</p>
+    </div>
+    <div class="featured-grid">
+      {featured.map((entry) => <WorkCard entry={entry} />)}
+    </div>
+    <div class="more-grid">
+      {more.map((entry) => <WorkCard entry={entry} />)}
+    </div>
+  </section>
+
+  <section id="experience" class="section wrap" aria-labelledby="exp-title">
+    <div class="section-head">
+      <h2 id="exp-title">Experience</h2>
+    </div>
+    <ol class="timeline">
+      {experience.map((job) => (
+        <li class="job">
+          <div class="job-meta">
+            <p class="period">{job.period}</p>
+            <p class="muted">{job.place}</p>
+          </div>
+          <div class="job-body">
+            <h3>{job.title}</h3>
+            <p class="org">{job.org}, {job.type.toLowerCase()}</p>
+            <ul>{job.points.map((pt) => <li>{pt}</li>)}</ul>
+          </div>
+        </li>
+      ))}
+    </ol>
+  </section>
+
+  <section id="skills" class="section wrap" aria-labelledby="skills-title">
+    <div class="section-head">
+      <h2 id="skills-title">Skills</h2>
+    </div>
+    <div class="skills">
+      <div>
+        <h3>What I lead with</h3>
+        <ul class="tags core">{skills.core.map((s) => <li>{s}</li>)}</ul>
+      </div>
+      <div>
+        <h3>What I build it on</h3>
+        <ul class="tags">{skills.supporting.map((s) => <li>{s}</li>)}</ul>
+      </div>
+    </div>
+  </section>
+
+  <section id="education" class="section wrap" aria-labelledby="edu-title">
+    <div class="section-head">
+      <h2 id="edu-title">Education</h2>
+    </div>
+    <div class="job edu">
+      <div class="job-meta">
+        <p class="period">{education.period}</p>
+      </div>
+      <div class="job-body">
+        <h3>{education.degree}</h3>
+        <p class="org">{education.school}, {education.grade}</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="contact" class="section wrap contact" aria-labelledby="contact-title">
+    <div>
+      <h2 id="contact-title">Hiring for LLM, agentic, or voice AI work?</h2>
+      <p class="muted">The quickest way to reach me is a message on LinkedIn.</p>
+    </div>
+    <a class="btn btn-primary" href={profile.links.linkedin} target="_blank" rel="me noopener">
+      <Icon name="linkedin" /> Message me on LinkedIn
+    </a>
+  </section>
+</Base>
+
+<style>
+  .hero {
+    display: grid; gap: clamp(2rem, 5vw, 3.5rem);
+    padding-block: clamp(3rem, 8vw, 5.5rem) clamp(1rem, 3vw, 2rem);
+    align-items: center;
+  }
+  .who { color: var(--muted); margin-bottom: 1rem; }
+  .hero h1 { max-width: 17ch; }
+  .intro { display: grid; gap: .9rem; margin-top: 1.5rem; max-width: 58ch; color: var(--muted); }
+  .actions { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: 2rem; }
+  @media (min-width: 960px) {
+    .hero { grid-template-columns: 1.1fr 1fr; }
+  }
+
+  .ask-slot { margin-bottom: clamp(2rem, 5vw, 3rem); }
+
+  .featured-grid, .more-grid { display: grid; gap: 1rem; }
+  .more-grid { margin-top: 1rem; }
+  @media (min-width: 760px) {
+    .featured-grid { grid-template-columns: 1fr 1fr; }
+    .more-grid { grid-template-columns: repeat(3, 1fr); }
+  }
+
+  .timeline { list-style: none; margin: 0; padding: 0; }
+  .job { display: grid; gap: .5rem 2rem; padding-block: 1.5rem; border-top: 1px solid var(--line); }
+  .job:first-child, .edu { border-top: 0; padding-top: 0; }
+  .period { font-weight: 600; }
+  .job-meta p:not(.period) { font-size: .92rem; }
+  .org { color: var(--muted); margin-top: .2rem; }
+  .job-body ul { margin: .9rem 0 0; padding-left: 1.1em; max-width: 68ch; }
+  .job-body li + li { margin-top: .4rem; }
+  @media (min-width: 760px) { .job { grid-template-columns: 13rem 1fr; } }
+
+  .skills { display: grid; gap: 2rem; }
+  .skills h3 { font-size: 1rem; margin-bottom: .8rem; }
+  .core li { background: var(--accent-soft); color: var(--accent-ink); font-weight: 560; font-size: .9rem; padding: .5rem .75rem; }
+  @media (min-width: 760px) { .skills { grid-template-columns: 1fr 1.4fr; } }
+
+  .contact { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 1.5rem; }
+  .contact h2 { margin-bottom: .4rem; }
+</style>

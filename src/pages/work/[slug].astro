@@ -1,0 +1,104 @@
+---
+import { getCollection, render } from 'astro:content';
+import Base from '../../layouts/Base.astro';
+import Flow from '../../components/Flow.astro';
+import Icon from '../../components/Icon.astro';
+import { diagrams } from '../../data/diagrams';
+
+export async function getStaticPaths() {
+  const work = (await getCollection('work', ({ data }) => !data.draft)).sort(
+    (a, b) => a.data.order - b.data.order,
+  );
+  return work.map((entry, i) => ({
+    params: { slug: entry.id },
+    props: { entry, next: work[(i + 1) % work.length] },
+  }));
+}
+
+const { entry, next } = Astro.props;
+const { Content } = await render(entry);
+const d = entry.data;
+const flows = diagrams[entry.id] ?? [];
+---
+<Base title={d.title} description={d.summary}>
+  <article class="wrap case">
+    <a class="back" href="/#work"><Icon name="back" /> All case studies</a>
+
+    <header class="head">
+      <h1>{d.title}</h1>
+      <p class="lede">{d.summary}</p>
+      <dl class="facts">
+        {d.period && <div><dt>Timeline</dt><dd>{d.period}</dd></div>}
+        {d.metric && <div class="key"><dt>{d.metric.label}</dt><dd>{d.metric.value}</dd></div>}
+      </dl>
+      {d.confidentiality && <p class="note">{d.confidentiality}</p>}
+    </header>
+
+    {flows.length > 0 && (
+      <section class="diagram" aria-labelledby="arch-title">
+        <h2 id="arch-title">Architecture</h2>
+        {flows.map((f) => <Flow flow={f} />)}
+      </section>
+    )}
+
+    <div class="prose body">
+      <Content />
+    </div>
+
+    <section class="stack" aria-labelledby="stack-title">
+      <h2 id="stack-title">Stack</h2>
+      <ul class="tags">{d.stack.map((s) => <li>{s}</li>)}</ul>
+      {d.repo && <p><a href={d.repo} target="_blank" rel="noopener">View the code on GitHub</a></p>}
+    </section>
+
+    {next && next.id !== entry.id && (
+      <nav class="next" aria-label="Next case study">
+        <span class="muted">Next case study</span>
+        <a href={`/work/${next.id}/`}>{next.data.title}</a>
+      </nav>
+    )}
+  </article>
+</Base>
+
+<style>
+  .case { padding-block: 2rem 5rem; }
+  .back { display: inline-flex; align-items: center; gap: .2rem; color: var(--muted); text-decoration: none; font-size: .95rem; }
+  .back :global(svg) { width: 18px; height: 18px; }
+  .back:hover { color: var(--ink); }
+
+  .head { margin-top: 2rem; max-width: 760px; }
+  .lede { font-size: 1.2rem; color: var(--muted); margin-top: 1rem; max-width: 56ch; }
+  .facts { display: flex; flex-wrap: wrap; gap: 1rem 2.5rem; margin: 2rem 0 0; }
+  .facts dt { font-size: .85rem; color: var(--muted); }
+  .facts dd { margin: .15rem 0 0; font-weight: 600; }
+  .facts .key dd { font-size: 1.6rem; font-weight: 650; color: var(--accent-ink); letter-spacing: -0.02em; line-height: 1.2; }
+  .facts .key dt { max-width: 30ch; }
+  .facts dt::first-letter { text-transform: uppercase; }
+  .note {
+    margin-top: 1.75rem; font-size: .92rem; color: var(--muted);
+    border-left: 3px solid var(--line-strong); padding-left: .9rem; max-width: 64ch;
+  }
+
+  .diagram {
+    margin-top: 3rem;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--r-lg);
+    padding: clamp(1.25rem, 3vw, 2rem);
+  }
+  .diagram h2 { font-size: 1.15rem; margin-bottom: 1.25rem; }
+  .diagram :global(.node) { background: var(--paper); }
+  .diagram :global(.node.accent) { background: var(--accent-soft); }
+  .diagram :global(.group) { background: var(--surface-2); }
+
+  .body { margin-top: 1rem; }
+  .stack { margin-top: 3rem; }
+  .stack h2 { font-size: 1.15rem; margin-bottom: .9rem; }
+  .stack p { margin-top: 1rem; }
+
+  .next {
+    margin-top: 4rem; padding-top: 1.5rem; border-top: 1px solid var(--line);
+    display: flex; flex-direction: column; gap: .2rem;
+  }
+  .next a { font-size: 1.35rem; font-weight: 620; color: var(--ink); }
+</style>
