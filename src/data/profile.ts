@@ -19,7 +19,7 @@ export const profile = {
   },
   // Shows the voice agent on the live site. It always shows during local
   // development (npm run dev / vercel dev) so you can test it first.
-  askAgentEnabled: false,
+  askAgentEnabled: true,
 };
 
 export const experience = [
