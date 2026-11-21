@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -55,6 +56,7 @@ best discussed with Vaibhav directly on LinkedIn.
 
 How to sound:
 - Two or three short sentences, like a person talking. Expand only if asked for detail.
+- Keep the first sentence short and get straight to the answer, with no preamble.
 - Plain words only: no markdown, lists, emojis, URLs, or symbols.
 - Say numbers the way you'd speak them: "about 800 milliseconds", "from about 12 seconds \
 to about 2".
@@ -72,6 +74,32 @@ BLOCKED_REPLY = "That work is under NDA, so I can't share those details."
 
 class NoModelAvailable(Exception):
     pass
+
+
+# One HTTP client per event loop, reused across requests on a warm instance so
+# the TLS connection to Groq doesn't have to be set up again for every question.
+_client: httpx.AsyncClient | None = None
+_client_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_client() -> httpx.AsyncClient:
+    global _client, _client_loop
+    loop = asyncio.get_running_loop()
+    if _client is None or _client.is_closed or _client_loop is not loop:
+        _client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0),
+            limits=httpx.Limits(max_keepalive_connections=5, keepalive_expiry=120),
+        )
+        _client_loop = loop
+    return _client
+
+
+async def warm_connection() -> None:
+    """Open the connection to Groq ahead of the first question."""
+    try:
+        await _get_client().head("https://api.groq.com/", timeout=3.0)
+    except Exception:
+        pass
 
 
 def build_messages(question: str, history: list[dict]) -> list[dict]:
@@ -110,41 +138,39 @@ async def stream_tokens(messages: list[dict]) -> AsyncIterator[tuple[str, str]]:
         raise NoModelAvailable("GROQ_API_KEY is not set")
 
     headers = {"Authorization": f"Bearer {api_key}"}
-    timeout = httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0)
-
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        for model in MODELS:
-            produced = False
-            try:
-                async with client.stream(
-                    "POST", GROQ_URL, headers=headers, json=_payload(model, messages)
-                ) as resp:
-                    if resp.status_code != 200:
-                        # 429 rate limit, 400 unsupported param, 5xx: log and try the next model.
-                        body = (await resp.aread()).decode(errors="replace")[:300]
-                        print(f"[agent] {model} -> HTTP {resp.status_code}: {body}", file=sys.stderr, flush=True)
+    client = _get_client()
+    for model in MODELS:
+        produced = False
+        try:
+            async with client.stream(
+                "POST", GROQ_URL, headers=headers, json=_payload(model, messages)
+            ) as resp:
+                if resp.status_code != 200:
+                    # 429 rate limit, 400 unsupported param, 5xx: log and try the next model.
+                    body = (await resp.aread()).decode(errors="replace")[:300]
+                    print(f"[agent] {model} -> HTTP {resp.status_code}: {body}", file=sys.stderr, flush=True)
+                    continue
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "):
                         continue
-                    async for line in resp.aiter_lines():
-                        if not line.startswith("data: "):
-                            continue
-                        data = line[6:].strip()
-                        if data == "[DONE]":
-                            break
-                        try:
-                            chunk = json.loads(data)
-                            delta = chunk["choices"][0]["delta"].get("content") or ""
-                        except (ValueError, KeyError, IndexError):
-                            continue
-                        if delta:
-                            produced = True
-                            yield model, delta
-                    if produced:
-                        return
-            except httpx.HTTPError as e:
-                print(f"[agent] {model} -> {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+                    data = line[6:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                        delta = chunk["choices"][0]["delta"].get("content") or ""
+                    except (ValueError, KeyError, IndexError):
+                        continue
+                    if delta:
+                        produced = True
+                        yield model, delta
                 if produced:
-                    return  # Cut off mid-answer: keep what was said.
-                continue
+                    return
+        except httpx.HTTPError as e:
+            print(f"[agent] {model} -> {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            if produced:
+                return  # Cut off mid-answer: keep what was said.
+            continue
     raise NoModelAvailable("All models failed or are rate-limited")
 
 
@@ -172,6 +198,21 @@ def split_sentences(buffer: str) -> tuple[list[str], str]:
     return out, rest
 
 
+_CLAUSE_END = re.compile(r"[,;:]\s|\s[-\u2013\u2014]\s")
+FIRST_CHUNK_MIN = 35  # characters before a clause break can be spoken early
+
+
+def split_first_clause(buffer: str) -> tuple[str | None, str]:
+    """For the very first chunk of an answer, speak at a comma or similar break
+    instead of waiting for the full sentence, if enough words have arrived."""
+    for m in _CLAUSE_END.finditer(buffer):
+        if m.start() >= FIRST_CHUNK_MIN:
+            if m.group().strip() in ",;:":
+                return buffer[: m.start() + 1].strip(), buffer[m.end():].lstrip()
+            return buffer[: m.start()].strip() + ",", buffer[m.end():].lstrip()  # dash
+    return None, buffer
+
+
 _MARKDOWN = re.compile(r"[*_`#>]+")
 
 
@@ -195,12 +236,17 @@ async def answer_sentences(question: str, history: list[dict]) -> AsyncIterator[
     buffer = ""
     model_sent = False
     blocked_once = False
+    emitted = False
     async for model, delta in stream_tokens(messages):
         if not model_sent:
             model_sent = True
             yield {"type": "model", "model": model}
         buffer += delta
         sentences, buffer = split_sentences(buffer)
+        if not emitted and not sentences:
+            first, buffer = split_first_clause(buffer)
+            if first:
+                sentences = [first]
         for s in sentences:
             text, blocked = guard(clean(s))
             if blocked:
@@ -208,6 +254,7 @@ async def answer_sentences(question: str, history: list[dict]) -> AsyncIterator[
                     continue
                 blocked_once = True
             if text:
+                emitted = True
                 yield {"type": "sentence", "text": text}
     tail = clean(buffer)
     if tail:

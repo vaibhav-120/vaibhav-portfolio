@@ -104,11 +104,21 @@
     let utterance = '';
     let userBubble: HTMLLIElement | null = null;
     let endTimer = 0;
+    // Latency tracking
+    const DEBUG = new URLSearchParams(location.search).has('debug');
+    const END_PAUSE_MS = 450; // silence after a final result before the turn is sent
+    const END_PAUSE_MID_MS = 1000; // when the recognizer is still producing words
+    let lastVoiceAt = 0; // last moment the mic level showed speech
+    let lastFinalAt = 0; // when the recognizer delivered its last final result
+    let voiceTimer = 0;
+    let lastQuestion = '';
+    let lastQuestionBubble: HTMLLIElement | null = null;
+    let sentAt = 0;
     let turnId = 0;
     let controller: AbortController | null = null;
     let agentBubble: HTMLLIElement | null = null;
     let agentText = '';
-    let heard: string[] = []; // sentences the visitor has actually heard this turn
+    let spoken: string[] = []; // sentences the visitor has actually heard this turn
     let lastAnswer = '';
     let lastSpokeAt = 0;
     let streamDone = true;
@@ -150,6 +160,8 @@
     async function start() {
       if (!SR) return;
       status.textContent = '';
+      // Wake the function, voice, and Groq connection while the visitor gets ready to talk.
+      fetch('/api/health?warm=1').catch(() => {});
       try {
         const Ctx = window.AudioContext || (window as any).webkitAudioContext;
         audioCtx = audioCtx || new Ctx();
@@ -176,6 +188,10 @@
       }
       setState('listening');
       startRecognition();
+      // Track when the visitor actually stops talking, from the mic level.
+      voiceTimer = window.setInterval(() => {
+        if (level(micAnalyser) > 0.1) lastVoiceAt = performance.now();
+      }, 50);
     }
 
     function stop() {
@@ -197,6 +213,7 @@
     }
 
     function cleanupMic() {
+      clearInterval(voiceTimer);
       micStream?.getTracks().forEach((t) => t.stop());
       micStream = null;
       micAnalyser = null;
@@ -271,8 +288,14 @@
       if (!heard || state === 'idle') return;
 
       if (state === 'thinking' || state === 'speaking') {
-        if (looksLikeEcho(heard) || !isInterruption(heard)) return;
-        bargeIn();
+        if (looksLikeEcho(heard)) return;
+        if (state === 'thinking' && !spoken.length && performance.now() - sentAt < 2500) {
+          // They hadn't finished: the pause was mid-sentence. Take the question back.
+          continueQuestion();
+        } else {
+          if (!isInterruption(heard)) return;
+          bargeIn();
+        }
       } else if (performance.now() - lastSpokeAt < 2500 && looksLikeEcho(heard)) {
         return; // Trailing echo just after the agent stopped talking.
       }
@@ -282,7 +305,29 @@
 
       // Wait for a short pause before treating the turn as finished.
       clearTimeout(endTimer);
-      if (finalText) endTimer = window.setTimeout(endTurn, interim ? 1200 : 700);
+      if (finalText) {
+        lastFinalAt = performance.now();
+        endTimer = window.setTimeout(endTurn, interim ? END_PAUSE_MID_MS : END_PAUSE_MS);
+      }
+    }
+
+    function continueQuestion() {
+      turnId++;
+      controller?.abort();
+      controller = null;
+      stopAudio();
+      agentBubble?.remove();
+      agentBubble = null;
+      agentText = '';
+      streamDone = true;
+      if (history.length && history[history.length - 1].role === 'user') history.pop();
+      utterance = lastQuestion;
+      if (lastQuestionBubble) {
+        userBubble = lastQuestionBubble;
+        userBubble.classList.add('interim');
+      }
+      status.textContent = '';
+      setState('listening');
     }
 
     function bargeIn() {
@@ -292,7 +337,7 @@
       stopAudio();
       if (agentBubble) {
         agentBubble.classList.remove('pending');
-        const said = heard.join(' ');
+        const said = spoken.join(' ');
         if (said) {
           agentBubble.textContent = said;
           agentBubble.classList.add('cut');
@@ -329,6 +374,8 @@
       utterance = '';
       if (!question || state !== 'listening') return;
       if (userBubble) userBubble.textContent = question;
+      lastQuestion = question;
+      lastQuestionBubble = userBubble;
       finishUserBubble();
       ask(question);
     }
@@ -410,7 +457,7 @@
       setState('thinking');
       status.textContent = '';
       agentText = '';
-      heard = [];
+      spoken = [];
       agentBubble = document.createElement('li');
       agentBubble.className = 'a pending';
       log.appendChild(agentBubble);
@@ -418,14 +465,40 @@
       streamDone = false;
 
       const t0 = performance.now();
+      sentAt = t0;
+      // End of speech: the mic's last loud moment if it's recent, else the last final result.
+      const finalAt = lastFinalAt || t0;
+      const spokeEnd = lastVoiceAt && finalAt - lastVoiceAt < 3000 ? Math.min(lastVoiceAt, finalAt) : finalAt;
       let model = '';
       let marked = false;
+      let timing: any = null;
+      let sentenceAt = 0;
       const markFirst = (extraMs = 0) => {
         if (marked || myTurn !== turnId) return;
         marked = true;
-        const ms = Math.round(performance.now() - t0 + extraMs);
+        const audioAt = performance.now() + extraMs;
+        const total = Math.round(audioAt - spokeEnd);
         const by = model ? `, answered by ${model.replace(/^openai\//, '')}` : '';
-        status.innerHTML = `First audio in <strong>${ms} ms</strong>${by}`;
+        status.innerHTML = `First audio <strong>${total} ms</strong> after you stopped talking${by}`;
+
+        const parts: Record<string, number> = {
+          recognition: Math.round(finalAt - spokeEnd),
+          pause: Math.round(t0 - finalAt),
+        };
+        if (timing && sentenceAt) {
+          const server = timing.firstSentence + timing.tts;
+          parts.network = Math.round(sentenceAt - t0 - server);
+          parts.firstToken = timing.firstToken;
+          parts.firstSentence = timing.firstSentence - timing.firstToken;
+          parts.voice = timing.tts;
+          parts.playback = Math.round(audioAt - sentenceAt);
+        }
+        const extra = timing ? { audioKb: timing.audioKb, coldStart: timing.cold } : {};
+        console.info('[voice agent] latency (ms)', { total, ...parts, ...extra });
+        if (DEBUG) {
+          const line = Object.entries(parts).map(([k, v]) => `${k} ${v}`).join(', ');
+          status.innerHTML += `<br><small>${line}${timing?.cold ? ', cold start' : ''}</small>`;
+        }
       };
 
       controller = new AbortController();
@@ -433,9 +506,9 @@
       // Show each sentence when it starts playing, so the transcript follows the voice.
       const reveal = (text: string) => {
         if (myTurn !== turnId) return;
-        heard.push(text);
+        spoken.push(text);
         bubble.classList.remove('pending');
-        bubble.textContent = heard.join(' ');
+        bubble.textContent = spoken.join(' ');
         log.scrollTop = log.scrollHeight;
       };
       try {
@@ -472,6 +545,7 @@
             else if (event === 'model') model = data.model;
             else if (event === 'sentence') {
               const text: string = data.text;
+              if (data.timing) { timing = data.timing; sentenceAt = performance.now(); }
               agentText += (agentText ? ' ' : '') + text;
               const played = serverVoice && data.audio
                 ? await playWav(data.audio, myTurn, (d) => {
@@ -496,7 +570,7 @@
         if (err?.name === 'AbortError' || myTurn !== turnId) return;
         bubble.classList.remove('pending');
         bubble.classList.add('error');
-        const msg = heard.join(' ') || err?.message || 'Something went wrong. Please ask again.';
+        const msg = spoken.join(' ') || err?.message || 'Something went wrong. Please ask again.';
         bubble.textContent = msg;
         if (!agentText) {
           lastAnswer = msg;

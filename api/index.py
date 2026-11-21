@@ -13,6 +13,7 @@ import base64
 import json
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -24,6 +25,7 @@ from _lib import agent, ratelimit, tts  # noqa: E402
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 tts.warm()
+_requests_served = 0  # 0 on a freshly started (cold) instance
 
 
 class Turn(BaseModel):
@@ -48,8 +50,13 @@ def _sse(event: str, data: dict) -> bytes:
 
 
 @app.get("/api/health")
-async def health():
+async def health(warm: int = 0):
+    """Status check. The widget calls it with ?warm=1 when the visitor presses Start,
+    so the instance, the voice, and the connection to Groq are ready before the
+    first question."""
     tts.warm()
+    if warm:
+        await agent.warm_connection()
     return {"ok": True, "voice": tts.ready(), "voice_status": tts.status(), "models": agent.MODELS}
 
 
@@ -77,24 +84,45 @@ async def ask(body: Ask, request: Request):
             return JSONResponse({"answer": agent.FALLBACK_REPLY, "model": ""}, status_code=503)
         return {"answer": " ".join(parts), "model": model}
 
+    global _requests_served
+    cold = _requests_served == 0
+    _requests_served += 1
+    t_start = time.perf_counter()
     tts.warm()
     speak = body.voice and tts.ready()
 
+    def ms() -> int:
+        return round((time.perf_counter() - t_start) * 1000)
+
     async def events():
         loop = asyncio.get_running_loop()
+        first = True
+        first_token_ms = 0
         try:
-            yield _sse("ready", {"serverVoice": speak})
+            yield _sse("ready", {"serverVoice": speak, "cold": cold})
             async for ev in agent.answer_sentences(question, history):
                 if ev["type"] == "model":
+                    first_token_ms = ms()
                     yield _sse("model", {"model": ev["model"]})
                     continue
                 payload = {"text": ev["text"]}
+                sentence_ms = ms()
                 if speak:
                     try:
                         wav = await loop.run_in_executor(None, tts.synthesize_wav, ev["text"])
                         payload["audio"] = base64.b64encode(wav).decode()
                     except Exception:
                         pass  # The browser falls back to its own voice for this sentence.
+                if first:
+                    first = False
+                    # Where the server's time went, for the widget's latency breakdown.
+                    payload["timing"] = {
+                        "firstToken": first_token_ms,
+                        "firstSentence": sentence_ms,
+                        "tts": ms() - sentence_ms,
+                        "audioKb": round(len(payload.get("audio", "")) / 1024),
+                        "cold": cold,
+                    }
                 yield _sse("sentence", payload)
             yield _sse("done", {})
         except agent.NoModelAvailable:
