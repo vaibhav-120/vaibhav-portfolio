@@ -106,8 +106,12 @@
     let endTimer = 0;
     // Latency tracking
     const DEBUG = new URLSearchParams(location.search).has('debug');
-    const END_PAUSE_MS = 450; // silence after a final result before the turn is sent
+    // Tunable from the URL while testing, e.g. ?debug&pause=600&merge=0
+    const params = new URLSearchParams(location.search);
+    const END_PAUSE_MS = Number(params.get('pause')) || 450; // silence after a final result before sending
     const END_PAUSE_MID_MS = 1000; // when the recognizer is still producing words
+    const MERGE = params.get('merge') !== '0'; // take the question back if they keep talking
+    let merges = 0;
     let lastVoiceAt = 0; // last moment the mic level showed speech
     let lastFinalAt = 0; // when the recognizer delivered its last final result
     let voiceTimer = 0;
@@ -290,7 +294,11 @@
       if (state === 'thinking' || state === 'speaking') {
         if (looksLikeEcho(heard)) return;
         if (state === 'thinking' && !spoken.length && performance.now() - sentAt < 2500) {
-          // They hadn't finished: the pause was mid-sentence. Take the question back.
+          // Chrome often re-delivers the end of what was said as a late final result.
+          // That's a duplicate, not new speech: ignore it.
+          if (isRepeatOfQuestion(heard)) return;
+          // Real new words before the answer started: the pause was mid-sentence.
+          if (!MERGE || words(heard).length < 2) return;
           continueQuestion();
         } else {
           if (!isInterruption(heard)) return;
@@ -311,7 +319,15 @@
       }
     }
 
+    function isRepeatOfQuestion(heard: string) {
+      const q = new Set(words(lastQuestion));
+      const w = words(heard);
+      return !w.length || w.filter((x) => q.has(x)).length / w.length >= 0.7;
+    }
+
     function continueQuestion() {
+      merges++;
+      console.info('[voice agent] visitor kept talking: question taken back and re-sent');
       turnId++;
       controller?.abort();
       controller = null;
@@ -374,6 +390,7 @@
       utterance = '';
       if (!question || state !== 'listening') return;
       if (userBubble) userBubble.textContent = question;
+      if (question !== lastQuestion && !question.startsWith(lastQuestion)) merges = 0;
       lastQuestion = question;
       lastQuestionBubble = userBubble;
       finishUserBubble();
@@ -493,11 +510,12 @@
           parts.voice = timing.tts;
           parts.playback = Math.round(audioAt - sentenceAt);
         }
-        const extra = timing ? { audioKb: timing.audioKb, coldStart: timing.cold } : {};
+        const extra = { merged: merges, ...(timing ? { audioKb: timing.audioKb, coldStart: timing.cold } : {}) };
         console.info('[voice agent] latency (ms)', { total, ...parts, ...extra });
         if (DEBUG) {
           const line = Object.entries(parts).map(([k, v]) => `${k} ${v}`).join(', ');
-          status.innerHTML += `<br><small>${line}${timing?.cold ? ', cold start' : ''}</small>`;
+          const flags = `${timing?.cold ? ', cold start' : ''}${merges ? `, re-sent ${merges}x` : ''}`;
+          status.innerHTML += `<br><small>${line}${flags}</small>`;
         }
       };
 
