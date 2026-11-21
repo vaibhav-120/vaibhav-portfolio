@@ -9,3 +9,8 @@ dist/
 !.env.example
 __pycache__/
 .venv/
+
+# Piper voice files: downloaded locally by scripts/download-voice.sh,
+# and at runtime on Vercel. Too big to commit.
+api/_data/voices/*.onnx
+api/_data/voices/*.onnx.json

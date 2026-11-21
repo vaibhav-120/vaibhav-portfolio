@@ -1,8 +1,9 @@
 {
   "functions": {
     "api/index.py": {
-      "includeFiles": "api/_data/**",
-      "maxDuration": 60
+      "maxDuration": 60,
+      "includeFiles": "api/_data/knowledge.md",
+      "excludeFiles": "{node_modules/**,src/**,public/**,dist/**,evals/**,scripts/**,api/_data/voices/**,**/piper/hebrew/*.onnx,**/onnxruntime/transformers/**,**/onnxruntime/quantization/**,**/onnxruntime/tools/**}"
     }
   },
   "rewrites": [{ "source": "/api/(.*)", "destination": "/api/index" }]

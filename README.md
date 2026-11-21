@@ -116,7 +116,7 @@ Browser speech recognition → /api/ask (FastAPI on Vercel) → Groq: gpt-oss-20
 - **Client names:** put every name the agent must never say in `BLOCKED_TERMS`, comma-separated. Any sentence containing one is replaced before it leaves the server. This is a backstop: the real protection is that `knowledge.md` contains no client names.
 - **Knowledge:** `api/_data/knowledge.md` is the agent's entire world. Edit it when your site changes, and keep it short, since every question sends the whole file to Groq.
 - **Free-tier limits:** Groq's limits are the hard ceiling. When they're hit, the agent falls back to the next model, then replies with a "try again or message me on LinkedIn" line. There's no card on the account, so there's no bill. Each visitor is also limited to 20 questions per 10 minutes (`RATE_LIMIT_MAX`, `RATE_LIMIT_WINDOW`).
-- **Voice:** if the Piper voice file is missing, the browser's built-in voice is used instead. To try another voice, pass its name to `scripts/download-voice.sh` and set `PIPER_VOICE`.
+- **Voice:** the Piper voice (~60 MB) is too big to ship inside the Vercel function (Hobby functions are capped at about 225 MB), so each new function instance downloads it to `/tmp` in the background. Locally it's read from `api/_data/voices/`. The files are git-ignored. Until the voice is ready, or if it can't be loaded, the browser's built-in voice is used instead. `vercel.json` also leaves out site files and unused parts of `piper-tts` and `onnxruntime` to keep the function small. To try another voice, pass its name to `scripts/download-voice.sh` and set `PIPER_VOICE` and `PIPER_VOICE_BASE_URL` (the voice’s folder on Hugging Face).
 - **Licence note:** the `piper-tts` package is GPL-3.0. Running it on your server is fine; keep that in mind if you ever distribute this code as a product.
 
 ### Evals
@@ -132,4 +132,4 @@ Run it after every change to `knowledge.md` or the agent's prompt.
 
 ### After the first deploy
 
-In the Vercel dashboard, open **Deployments → your deployment → Functions** and check that `api/index.py` is listed. Then visit `/api/health`: it should return `"voice": true` once the Piper voice is committed.
+In the Vercel dashboard, open **Deployments → your deployment → Functions** and check that `api/index.py` is listed. Then visit `/api/health`. The first visit starts downloading the Piper voice in the background (`"voice_status": "loading"`); a few seconds later it should show `"voice": true`. Until then, answers use the browser's voice.

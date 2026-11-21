@@ -49,7 +49,8 @@ def _sse(event: str, data: dict) -> bytes:
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "voice": tts.available(), "models": agent.MODELS}
+    tts.warm()
+    return {"ok": True, "voice": tts.ready(), "voice_status": tts.status(), "models": agent.MODELS}
 
 
 @app.post("/api/ask")
@@ -76,7 +77,8 @@ async def ask(body: Ask, request: Request):
             return JSONResponse({"answer": agent.FALLBACK_REPLY, "model": ""}, status_code=503)
         return {"answer": " ".join(parts), "model": model}
 
-    speak = body.voice and tts.available()
+    tts.warm()
+    speak = body.voice and tts.ready()
 
     async def events():
         loop = asyncio.get_running_loop()
