@@ -103,10 +103,12 @@ Worth adding when you have time, because these are the strongest parts of each c
 ## The voice agent
 
 ```
-Browser speech recognition → /api/ask (FastAPI on Vercel) → Groq: gpt-oss-20b, falls back to llama-3.1-8b-instant
-                                                          → Piper speaks each sentence as soon as it's written
+Browser speech recognition ─ silence detected ─→ /api/ask (FastAPI, text only) → Groq: gpt-oss-20b, falls back to llama-3.1-8b-instant
+                                                   │ streams the answer a sentence at a time
+Browser ←── audio, played in order ── /api/tts (FastAPI + Piper, its own function) ←── each sentence, requested as soon as it arrives
 ```
 
+- **Ending a turn:** the widget watches the mic level and sends the question about half a second after the visitor stops talking, using the words recognized so far, instead of waiting a second or more for Chrome to finalize them. If Chrome later corrects or completes the last words before the answer starts, the question is re-sent. Tuning while testing: `?debug&silence=600`, `?debug&vad=0` (wait for Chrome instead), `?debug&voice=browser`.
 - **How a conversation works:** the visitor presses Start conversation once. The mic stays on and the agent answers each question until they press Stop. Speaking while the agent talks interrupts it: audio stops at once, the transcript keeps only what was actually heard, and the agent listens to the new question.
 - **Echo handling:** with speakers, the mic can hear the agent's own voice. Speech that mostly repeats what the agent just said is ignored, so the agent doesn't interrupt itself. Headphones avoid the problem entirely, which the widget suggests.
 - **Browser support:** voice input needs the Web Speech API, available in Chrome, Edge, and Safari. In other browsers the panel explains this instead of starting.
@@ -116,7 +118,8 @@ Browser speech recognition → /api/ask (FastAPI on Vercel) → Groq: gpt-oss-20
 - **Client names:** put every name the agent must never say in `BLOCKED_TERMS`, comma-separated. Any sentence containing one is replaced before it leaves the server. This is a backstop: the real protection is that `knowledge.md` contains no client names.
 - **Knowledge:** `api/_data/knowledge.md` is the agent's entire world. Edit it when your site changes, and keep it short, since every question sends the whole file to Groq.
 - **Free-tier limits:** Groq's limits are the hard ceiling. When they're hit, the agent falls back to the next model, then replies with a "try again or message me on LinkedIn" line. There's no card on the account, so there's no bill. Each visitor is also limited to 20 questions per 10 minutes (`RATE_LIMIT_MAX`, `RATE_LIMIT_WINDOW`).
-- **Voice:** the Piper voice (~60 MB) is too big to ship inside the Vercel function (Hobby functions are capped at about 225 MB), so each new function instance downloads it to `/tmp` in the background. Locally it's read from `api/_data/voices/`. The files are git-ignored. Until the voice is ready, or if it can't be loaded, the browser's built-in voice is used instead. `vercel.json` also leaves out site files and unused parts of `piper-tts` and `onnxruntime` to keep the function small. To try another voice, pass its name to `scripts/download-voice.sh` and set `PIPER_VOICE` and `PIPER_VOICE_BASE_URL` (the voice’s folder on Hugging Face).
+- **Two functions:** `api/index.py` handles the conversation and never loads the voice, so it starts fast. `api/tts.py` turns each sentence into audio. Keeping them apart matters: when the voice loaded inside the conversation function, it stalled answers by up to 10 seconds.
+- **Voice:** the Piper voice (~60 MB) is too big to ship inside a Vercel function (Hobby functions are capped at about 225 MB), so the speech function downloads it to `/tmp` the first time a new instance is used. The widget triggers that when the visitor presses Start, and uses the browser's voice for any answer that starts before the voice is ready. `PIPER_DISABLED=1` switches Piper off entirely. Locally it's read from `api/_data/voices/`. The files are git-ignored. Until the voice is ready, or if it can't be loaded, the browser's built-in voice is used instead. `vercel.json` also leaves out site files and unused parts of `piper-tts` and `onnxruntime` to keep the function small. To try another voice, pass its name to `scripts/download-voice.sh` and set `PIPER_VOICE` and `PIPER_VOICE_BASE_URL` (the voice’s folder on Hugging Face).
 - **Licence note:** the `piper-tts` package is GPL-3.0. Running it on your server is fine; keep that in mind if you ever distribute this code as a product.
 
 ### Evals
