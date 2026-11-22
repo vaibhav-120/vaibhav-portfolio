@@ -18,7 +18,7 @@ GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 MODELS = [
     m.strip()
     for m in os.environ.get(
-        "GROQ_MODELS", "openai/gpt-oss-20b,llama-3.1-8b-instant"
+        "GROQ_MODELS", "qwen/qwen3.8-27b,openai/gpt-oss-20b"
     ).split(",")
     if m.strip()
 ]
@@ -126,6 +126,9 @@ def _payload(model: str, messages: list[dict]) -> dict:
         # Reasoning models: think briefly, and keep the reasoning out of the reply.
         body["reasoning_effort"] = "low"
         body["include_reasoning"] = False
+    elif model.startswith("qwen/qwen3"):
+        body["reasoning_effort"] = "none"
+        body["reasoning_format"] = "hidden"
     return body
 
 

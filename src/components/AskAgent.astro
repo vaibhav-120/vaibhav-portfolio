@@ -171,6 +171,7 @@
       stateLabel.textContent = labels[next];
       toggleLabel.textContent = next === 'idle' ? 'Start conversation' : 'Stop';
       if (next === 'speaking' || next === 'thinking') lastSpokeAt = performance.now();
+      scheduleDraw();
     }
 
     // ---- Start / stop --------------------------------------------------------
@@ -704,21 +705,15 @@
 
     // ---- Orb animation ------------------------------------------------------------
     const ctx2d = canvas.getContext('2d')!;
-    let colors = readColors();
-    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => (colors = readColors()));
-
-    function readColors() {
-      const cs = getComputedStyle(root);
-      return {
-        accent: cs.getPropertyValue('--accent').trim() || '#0e7c74',
-        ink: cs.getPropertyValue('--accent-ink').trim() || '#0a5c56',
-        soft: cs.getPropertyValue('--surface').trim() || '#ffffff',
-      };
-    }
+    const levelBuffers = new WeakMap<AnalyserNode, Uint8Array>();
 
     function level(analyser: AnalyserNode | null) {
       if (!analyser) return 0;
-      const data = new Uint8Array(analyser.fftSize);
+      let data = levelBuffers.get(analyser);
+      if (!data) {
+        data = new Uint8Array(analyser.fftSize);
+        levelBuffers.set(analyser, data);
+      }
       analyser.getByteTimeDomainData(data);
       let sum = 0;
       for (let i = 0; i < data.length; i++) {
@@ -729,16 +724,31 @@
     }
 
     let smooth = 0;
-    let visible = true;
+    let visible = false;
+    let frame = 0;
+    const palette = ['#76f5ff', '#42b8ff', '#5a83ff', '#a69cff'];
+    const rings = [
+      { radius: 1.13, yScale: 0.9, start: -0.7, end: 4.2, speed: 0.24, color: palette[0] },
+      { radius: 1.38, yScale: 0.78, start: 0.4, end: 5.4, speed: -0.3, color: palette[1] },
+      { radius: 1.62, yScale: 0.92, start: -2.35, end: 1.75, speed: 0.18, color: palette[2] },
+    ];
+    const barAngles = Array.from({ length: 40 }, (_, index) => (index / 40) * Math.PI * 2);
+
+    function scheduleDraw() {
+      if (visible && !frame) frame = requestAnimationFrame(draw);
+    }
+
     new IntersectionObserver(([entry]) => {
       visible = entry.isIntersecting;
-      if (visible) requestAnimationFrame(draw);
+      scheduleDraw();
     }).observe(canvas);
 
     function draw(now: number) {
+      frame = 0;
       if (!visible) return;
       const dpr = window.devicePixelRatio || 1;
       const size = canvas.clientWidth;
+      if (!size) return;
       if (canvas.width !== Math.round(size * dpr)) {
         canvas.width = canvas.height = Math.round(size * dpr);
       }
@@ -752,79 +762,80 @@
       let target = 0;
       if (state === 'listening') target = level(micAnalyser);
       else if (state === 'speaking') {
-        target = sources.length ? level(outAnalyser) : 0.35 + 0.25 * Math.sin(t * 9) * Math.sin(t * 3.1);
-      } else if (state === 'thinking') target = 0.12;
-      else target = 0.05 + 0.04 * Math.sin(t * 1.2);
-      if (still) target = state === 'idle' ? 0 : 0.15;
+        target = sources.length ? level(outAnalyser) : 0.3 + 0.2 * Math.sin(t * 7) * Math.sin(t * 2.4);
+      } else if (state === 'thinking') target = 0.18;
+      else target = 0.045 + 0.025 * Math.sin(t * 1.1);
+      if (still) target = state === 'idle' ? 0 : 0.12;
       smooth += (target - smooth) * 0.18;
 
       const cx = size / 2;
-      const r0 = size * 0.27;
+      const active = state === 'listening' || state === 'speaking';
+      const energy = active ? smooth : state === 'thinking' ? 0.2 : 0.06 + 0.02 * Math.sin(t);
+      const coreRadius = size * 0.22 * (1 + energy * 0.08);
+      const haloRadius = coreRadius * (1.65 + energy * 0.55);
 
-      // Halo
-      const haloR = Math.min(size * 0.49, r0 * (1.6 + smooth * 0.3));
-      const halo = c.createRadialGradient(cx, cx, r0 * 0.6, cx, cx, haloR);
-      halo.addColorStop(0, withAlpha(colors.accent, 0.28 + smooth * 0.25));
-      halo.addColorStop(1, withAlpha(colors.accent, 0));
+      const halo = c.createRadialGradient(cx, cx, coreRadius * 0.35, cx, cx, haloRadius);
+      halo.addColorStop(0, withAlpha(palette[0], 0.24 + energy * 0.2));
+      halo.addColorStop(0.48, withAlpha(palette[1], 0.1 + energy * 0.12));
+      halo.addColorStop(1, withAlpha(palette[1], 0));
       c.fillStyle = halo;
       c.beginPath();
-      c.arc(cx, cx, haloR, 0, Math.PI * 2);
+      c.arc(cx, cx, haloRadius, 0, Math.PI * 2);
       c.fill();
 
-      // Three layered blobs that ripple with the voice level.
-      const layers = [
-        { scale: 1.18, alpha: 0.18, speed: 0.6, amp: 0.1 },
-        { scale: 1.08, alpha: 0.3, speed: -0.9, amp: 0.08 },
-        { scale: 1.0, alpha: 1, speed: 1.3, amp: 0.06 },
-      ];
-      for (const L of layers) {
+      const ringRotation = state === 'thinking' ? t * 0.9 : active ? t * 0.16 : t * 0.035;
+      for (const [index, ring] of rings.entries()) {
+        c.save();
+        c.translate(cx, cx);
+        c.rotate(ringRotation * (index % 2 ? -1 : 1) * ring.speed);
         c.beginPath();
-        const n = 120;
-        for (let i = 0; i <= n; i++) {
-          const a = (i / n) * Math.PI * 2;
-          const wobble =
-            Math.sin(a * 3 + t * L.speed * 2) * 0.5 +
-            Math.sin(a * 5 - t * L.speed * 1.4) * 0.3 +
-            Math.sin(a * 7 + t * L.speed * 3.1) * 0.2;
-          const r = r0 * L.scale * (1 + (L.amp * 0.4 + smooth * L.amp * 1.8) * wobble + smooth * 0.07);
-          const x = cx + Math.cos(a) * r;
-          const y = cx + Math.sin(a) * r;
-          i ? c.lineTo(x, y) : c.moveTo(x, y);
-        }
-        c.closePath();
-        if (L.alpha === 1) {
-          const g = c.createLinearGradient(cx - r0, cx - r0, cx + r0, cx + r0);
-          g.addColorStop(0, colors.accent);
-          g.addColorStop(1, colors.ink);
-          c.fillStyle = g;
-        } else {
-          c.fillStyle = withAlpha(colors.accent, L.alpha);
-        }
-        c.fill();
+        c.ellipse(
+          0,
+          0,
+          coreRadius * (ring.radius + energy * 0.1),
+          coreRadius * ring.yScale,
+          0,
+          ring.start,
+          ring.end,
+        );
+        c.strokeStyle = withAlpha(ring.color, 0.34 + energy * 0.48);
+        c.lineWidth = Math.max(1, size * 0.009);
+        c.shadowColor = ring.color;
+        c.shadowBlur = size * 0.055;
+        c.stroke();
+        c.restore();
       }
 
-      // Thinking: dots orbiting the core.
-      if (state === 'thinking') {
-        for (let i = 0; i < 3; i++) {
-          const a = t * 2.4 + (i * Math.PI * 2) / 3;
-          const rr = r0 * 1.45;
-          c.beginPath();
-          c.fillStyle = withAlpha(colors.ink, 0.85);
-          c.arc(cx + Math.cos(a) * rr, cx + Math.sin(a) * rr, size * 0.018, 0, Math.PI * 2);
-          c.fill();
-        }
+      // Radial bars respond to microphone and assistant audio energy.
+      for (let i = 0; i < barAngles.length; i++) {
+        const angle = barAngles[i];
+        const variation = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(i * 2.1 + t * (state === 'thinking' ? 1.2 : 3.2)));
+        const length = size * (0.006 + energy * 0.05) * variation;
+        const inner = coreRadius * 1.14;
+        const outer = inner + length;
+        c.beginPath();
+        c.moveTo(cx + Math.cos(angle) * inner, cx + Math.sin(angle) * inner);
+        c.lineTo(cx + Math.cos(angle) * outer, cx + Math.sin(angle) * outer);
+        c.strokeStyle = withAlpha(palette[i % palette.length], 0.26 + energy * 0.58);
+        c.lineWidth = Math.max(1, size * 0.006);
+        c.lineCap = 'round';
+        c.stroke();
       }
 
-      // Soft highlight on the core.
-      const hl = c.createRadialGradient(cx - r0 * 0.35, cx - r0 * 0.4, 0, cx - r0 * 0.35, cx - r0 * 0.4, r0 * 0.9);
-      hl.addColorStop(0, 'rgba(255,255,255,0.35)');
-      hl.addColorStop(1, 'rgba(255,255,255,0)');
-      c.fillStyle = hl;
+      const core = c.createRadialGradient(cx - coreRadius * 0.32, cx - coreRadius * 0.36, 0, cx, cx, coreRadius);
+      core.addColorStop(0, '#f2ffff');
+      core.addColorStop(0.28, palette[0]);
+      core.addColorStop(0.72, palette[1]);
+      core.addColorStop(1, palette[2]);
+      c.fillStyle = core;
+      c.shadowColor = palette[0];
+      c.shadowBlur = size * (0.08 + energy * 0.08);
       c.beginPath();
-      c.arc(cx, cx, r0 * 0.98, 0, Math.PI * 2);
+      c.arc(cx, cx, coreRadius * 0.86, 0, Math.PI * 2);
       c.fill();
+      c.shadowBlur = 0;
 
-      requestAnimationFrame(draw);
+      scheduleDraw();
     }
 
     function withAlpha(color: string, a: number) {
@@ -836,6 +847,6 @@
       return color;
     }
 
-    requestAnimationFrame(draw);
+    scheduleDraw();
   }
 </script>

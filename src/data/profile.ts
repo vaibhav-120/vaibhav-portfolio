@@ -12,8 +12,7 @@ export const profile = {
   ],
   links: {
     linkedin: 'https://www.linkedin.com/in/vaibhav-shrivastava120/',
-    // TODO: paste a public link to your résumé PDF to show the download button.
-    resume: '',
+    resume: 'https://drive.google.com/file/d/1SE0RSmTeKAjbJD1HRGpJ9KbroQC4cX6z/view?usp=drivesdk',
     // Optional: add your GitHub profile URL to show it in the header and footer.
     github: '',
   },

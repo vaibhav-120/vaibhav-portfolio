@@ -21,8 +21,10 @@ from fastapi.responses import JSONResponse, StreamingResponse  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
 from _lib import agent, ratelimit  # noqa: E402
+from _lib.tts_routes import router as tts_router  # noqa: E402
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+app.include_router(tts_router)
 _requests_served = 0  # 0 on a freshly started (cold) instance
 
 
