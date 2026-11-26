@@ -39,7 +39,7 @@ defaultTest:
 
 tests:
   # Facts it must get right
-  - description: HealthAera latency numbers
+  - description: Healthcare AI Platform latency numbers
     vars: { question: How much did he improve latency on the healthcare platform? }
     assert:
       - type: icontains-any

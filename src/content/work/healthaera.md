@@ -1,9 +1,8 @@
 ---
-title: HealthAera
+title: Healthcare AI Platform
 summary: Multi-agent AI workflows for a HIPAA-aligned US healthcare platform, grounded in each patient’s reports and FHIR data.
 order: 1
 featured: true
-period: Oct 2025 – Present
 metric:
   value: "~12 s → ~2 s"
   label: time to first token after re-architecting the system

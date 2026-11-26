@@ -6,7 +6,7 @@
 <section id="ask" class="ask" aria-labelledby="ask-title" data-state="idle">
   <div class="stage">
     <h2 id="ask-title">Ask about my work</h2>
-    <p class="muted lede">Start a conversation and ask anything about my projects. Interrupt any time.</p>
+    <p class="muted lede">Ask about my work, then continue with another question after each answer.</p>
 
     <div class="orb-wrap">
       <canvas class="orb" data-orb aria-hidden="true"></canvas>
@@ -100,7 +100,6 @@
     // ---- Settings (tunable from the URL while testing) ------------------------
     // e.g. ?debug&silence=600&vad=0&voice=browser&merge=0
     const params = new URLSearchParams(location.search);
-    const DEBUG = params.has('debug');
     const USE_VAD = params.get('vad') !== '0'; // end the turn from mic silence
     const VAD_SILENCE_MS = Number(params.get('silence')) || 550;
     const FINAL_PAUSE_MS = Number(params.get('pause')) || 450; // fallback: after a final result
@@ -166,11 +165,15 @@
     }
 
     function setState(next: State) {
+      const wasSpeaking = state === 'speaking';
       state = next;
       root.dataset.state = next;
       stateLabel.textContent = labels[next];
       toggleLabel.textContent = next === 'idle' ? 'Start conversation' : 'Stop';
       if (next === 'speaking' || next === 'thinking') lastSpokeAt = performance.now();
+      if (next === 'speaking' && !wasSpeaking && recognition) {
+        try { recognition.stop(); } catch { /* not running */ }
+      }
       scheduleDraw();
     }
 
@@ -294,9 +297,9 @@
         const finals: string[] = [];
         let interim = '';
         for (let i = e.resultIndex; i < e.results.length; i++) {
-          const t = e.results[i][0].transcript;
-          if (e.results[i].isFinal) finals.push(t);
-          else interim += t;
+          const text = e.results[i][0].transcript;
+          if (e.results[i].isFinal) finals.push(text);
+          else interim += text;
         }
         onSpeech(finals.join(' ').trim(), interim.trim());
       };
@@ -304,16 +307,13 @@
         if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
           stop();
           status.textContent = 'Microphone access is blocked. Allow it in your browser settings and try again.';
-        } else if (e.error === 'network') {
-          status.textContent = 'Voice recognition lost its connection. It will keep trying.';
         }
-        // 'no-speech' and 'aborted' are normal in long sessions; onend restarts.
+        // Network, no-speech, and aborted events are handled by onend.
       };
-      // Browsers end recognition after silence or a time limit. Keep it going.
       recognition.onend = () => {
-        if (state === 'idle') return;
+        if (state !== 'listening' && state !== 'thinking') return;
         setTimeout(() => {
-          if (state !== 'idle' && recognition) {
+          if ((state === 'listening' || state === 'thinking') && recognition) {
             try { recognition.start(); } catch { /* already running */ }
           }
         }, 150);
@@ -334,11 +334,6 @@
       return w.filter((x) => said.has(x)).length / w.length >= 0.6;
     }
 
-    function isInterruption(heard: string) {
-      if (/^(stop|wait|hold on|sorry|excuse me)\b/i.test(heard.trim())) return true;
-      return words(heard).length >= 2;
-    }
-
     // Recognizer output that only repeats words already in the sent question
     // (Chrome re-delivering the end of the sentence as a late final).
     function isRepeatOfQuestion(heard: string) {
@@ -348,19 +343,16 @@
 
     function onSpeech(finalText: string, interim: string) {
       const heard = `${finalText} ${interim}`.trim();
-      if (!heard || state === 'idle') return;
+      if (!heard || state === 'idle' || state === 'speaking') return;
       const now = performance.now();
       lastResultAt = now;
 
-      if (state === 'thinking' || state === 'speaking') {
+      if (state === 'thinking') {
         if (looksLikeEcho(heard)) return;
-        if (state === 'thinking' && !spoken.length && now - sentAt < 3000) {
+        if (!spoken.length && now - sentAt < 3000) {
           if (isRepeatOfQuestion(heard) || !MERGE) return;
           // New words before the answer started: the question wasn't finished.
           continueQuestion();
-        } else {
-          if (!isInterruption(heard)) return;
-          bargeIn();
         }
       } else if (now - lastSpokeAt < 2500 && looksLikeEcho(heard)) {
         return; // Trailing echo just after the agent stopped talking.
@@ -394,34 +386,6 @@
         userBubble = lastQuestionBubble;
         userBubble.classList.add('interim');
       }
-      status.textContent = '';
-      setState('listening');
-    }
-
-    function bargeIn() {
-      turnId++;
-      controller?.abort();
-      controller = null;
-      stopAudio();
-      if (agentBubble) {
-        agentBubble.classList.remove('pending');
-        const said = spoken.join(' ');
-        const last = history[history.length - 1];
-        if (said) {
-          agentBubble.textContent = said;
-          agentBubble.classList.add('cut');
-          // Remember only what was actually heard.
-          if (last?.role === 'assistant' && last.content === agentText) last.content = said;
-          else history.push({ role: 'assistant', content: said });
-        } else {
-          agentBubble.remove();
-          if (last?.role === 'assistant' && last.content === agentText) history.pop();
-        }
-        lastAnswer = agentText;
-      }
-      agentBubble = null;
-      agentText = '';
-      streamDone = true;
       status.textContent = '';
       setState('listening');
     }
@@ -482,6 +446,9 @@
         lastSpokeAt = performance.now();
         agentBubble = null;
         setState('listening');
+        if (recognition) {
+          try { recognition.start(); } catch { /* onend handles a pending stop */ }
+        }
       }
     }
 
@@ -591,8 +558,6 @@
         if (marked || myTurn !== turnId) return;
         marked = true;
         const total = Math.round(audioAt - spokeEnd);
-        const by = model ? `, answered by ${model.replace(/^openai\//, '')}` : '';
-        status.innerHTML = `First audio <strong>${total} ms</strong> after you stopped talking${by}`;
         const parts: Record<string, number | string> = {
           endpoint: Math.round(t0 - spokeEnd),
         };
@@ -605,11 +570,6 @@
           parts.playback = Math.round(audioAt - readyAt);
         }
         console.info('[voice agent] latency (ms)', { total, ...parts, endedBy: via, merged: merges, cold: !!timing?.cold });
-        if (DEBUG) {
-          const line = Object.entries(parts).map(([k, v]) => `${k} ${v}`).join(', ');
-          const flags = `, ended by ${via}${timing?.cold ? ', cold start' : ''}${merges ? `, re-sent ${merges}x` : ''}`;
-          status.innerHTML += `<br><small>${line}${flags}</small>`;
-        }
       };
 
       // Queue one sentence: its audio is fetched right away (in parallel with the

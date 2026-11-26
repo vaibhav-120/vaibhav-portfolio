@@ -12,7 +12,7 @@ export const profile = {
   ],
   links: {
     linkedin: 'https://www.linkedin.com/in/vaibhav-shrivastava120/',
-    resume: 'https://drive.google.com/file/d/1SE0RSmTeKAjbJD1HRGpJ9KbroQC4cX6z/view?usp=drivesdk',
+    resume: 'https://drive.google.com/file/d/1E-uI-h7aXXdw50F0-z-y4YCYV1OOd-32/view?usp=drivesdk',
     // Optional: add your GitHub profile URL to show it in the header and footer.
     github: '',
   },
@@ -32,7 +32,7 @@ export const experience = [
       'Built multi-agent workflows for a HIPAA-aligned US healthcare platform, grounded in patient reports and FHIR data.',
       'Re-architected those workflows end to end, from orchestration to code, on LangGraph with MCP-based task creation, cutting time to first token from ~12 s to ~2 s.',
       'Building Emnaar, an on-premise English, Hindi, and Hinglish telephony voice assistant with ~800 ms from end of turn to first audio.',
-      'Keep these systems reliable with LLM evaluation in Ragas, LangSmith, and Promptfoo, on FastAPI and Django backends.',
+      'Applied LLM evaluation with Ragas, LangSmith, and Promptfoo to measure response quality across production AI work.',
     ],
   },
   {
@@ -43,7 +43,6 @@ export const experience = [
     place: 'Mohali, Punjab',
     points: [
       'Evaluated and optimized LLM responses across projects with Ragas and Promptfoo.',
-      'Built a tender automation system that reads full tender documents, summarizes them, weighs strengths and weaknesses, and flags resource gaps.',
       'Moved onto the healthcare client project after three months and contributed to production features. Brought on full-time afterwards.',
     ],
   },
